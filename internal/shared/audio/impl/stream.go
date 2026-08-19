@@ -85,7 +85,7 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 	}
 
 	reader := newOggReader(stdout)
-	reader.skipPackets = 2
+	reader.minFrameSize = 20  // skip metadata packets smaller than 20 bytes
 
 	frames := 0
 	for {
@@ -113,15 +113,14 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 }
 
 type oggReader struct {
-	r          io.Reader
-	buf        []byte
-	pos        int
-	end        int
-	segments   []byte
-	segIdx     int
-	packetBuf  []byte
-	skipPackets int
-	skipped    int
+	r           io.Reader
+	buf         []byte
+	pos         int
+	end         int
+	segments    []byte
+	segIdx      int
+	packetBuf   []byte
+	minFrameSize int
 }
 
 func newOggReader(r io.Reader) *oggReader {
@@ -150,8 +149,7 @@ func (o *oggReader) readPacket() ([]byte, error) {
 				packet := o.packetBuf
 				o.packetBuf = nil
 
-				if o.skipped < o.skipPackets {
-					o.skipped++
+				if len(packet) < o.minFrameSize {
 					continue
 				}
 				return packet, nil
