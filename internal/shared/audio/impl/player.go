@@ -81,7 +81,7 @@ func (ps *PlayerService) playLoop(ctx context.Context, guildID, voiceChannelID s
 		}
 
 		log.Printf("Playing: %s\n", entry.Track.Title)
-		if err := playStream(ctx, vc, entry.Track.URL); err != nil {
+		if err := playTestTone(ctx, vc); err != nil {
 			if err == context.Canceled {
 				return
 			}

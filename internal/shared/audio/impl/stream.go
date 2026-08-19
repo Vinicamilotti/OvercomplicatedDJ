@@ -124,6 +124,64 @@ func hexFirstBytes(data []byte) string {
 	return hex.EncodeToString(data[:n])
 }
 
+func playTestTone(ctx context.Context, vc *discordgo.VoiceConnection) error {
+	log.Println("playTestTone: generating 440Hz test tone...")
+
+	gen := exec.CommandContext(ctx, "ffmpeg",
+		"-f", "lavfi",
+		"-i", "sine=frequency=440:duration=5",
+		"-acodec", "libopus",
+		"-f", "ogg",
+		"-vbr", "on",
+		"-ar", "48000",
+		"-ac", "2",
+		"-b:a", "64000",
+		"-application", "audio",
+		"-frame_duration", "20",
+		"pipe:1",
+	)
+
+	stdout, err := gen.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("tone stdout pipe: %w", err)
+	}
+
+	if err := gen.Start(); err != nil {
+		return fmt.Errorf("tone start: %w", err)
+	}
+
+	reader := newOggReader(stdout)
+	frames := 0
+
+	for {
+		packet, err := reader.readPacket()
+		if err != nil {
+			if err == io.EOF {
+				gen.Wait()
+				log.Printf("playTestTone: finished, sent %d frames", frames)
+				return nil
+			}
+			return fmt.Errorf("ogg read: %w", err)
+		}
+
+		if len(packet) < 20 || packet[0]&0x80 == 0 {
+			continue
+		}
+
+		if frames == 0 {
+			log.Printf("playTestTone: first audio frame len=%d hex=%s",
+				len(packet), hexFirstBytes(packet))
+		}
+
+		select {
+		case vc.OpusSend <- packet:
+			frames++
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 type oggReader struct {
 	r         io.Reader
 	buf       []byte
