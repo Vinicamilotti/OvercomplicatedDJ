@@ -160,7 +160,7 @@ func (o *oggReader) readPacket() ([]byte, error) {
 				packet := o.packetBuf
 				o.packetBuf = nil
 
-				if len(packet) == 0 || packet[0]&0x80 == 0 {
+				if len(packet) < 20 || packet[0]&0x80 == 0 {
 					continue
 				}
 				return packet, nil
