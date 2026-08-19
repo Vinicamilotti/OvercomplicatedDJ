@@ -7,12 +7,10 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"os/exec"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/jonas747/dca"
 )
 
 func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL string) error {
@@ -40,17 +38,9 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 		return fmt.Errorf("yt-dlp parse: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp("", "yt-audio-*")
-	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-
-	log.Printf("playStream: downloading audio...")
+	log.Printf("playStream: streaming audio...")
 	req, err := http.NewRequestWithContext(ctx, "GET", info.URL, nil)
 	if err != nil {
-		tmpFile.Close()
 		return fmt.Errorf("http request: %w", err)
 	}
 	for k, v := range info.HTTPHeaders {
@@ -59,52 +49,191 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		tmpFile.Close()
 		return fmt.Errorf("http download: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		tmpFile.Close()
 		return fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("download write: %w", err)
-	}
-	tmpFile.Close()
+	log.Printf("playStream: starting ffmpeg encode...")
+	ffmpeg := exec.CommandContext(ctx, "ffmpeg",
+		"-i", "pipe:0",
+		"-map", "0:a",
+		"-acodec", "libopus",
+		"-f", "ogg",
+		"-vbr", "on",
+		"-compression_level", "10",
+		"-ar", "48000",
+		"-ac", "2",
+		"-b:a", "64000",
+		"-application", "audio",
+		"-frame_duration", "20",
+		"-packet_loss", "1",
+		"pipe:1",
+	)
+	ffmpeg.Stdin = resp.Body
 
-	st, _ := os.Stat(tmpPath)
-	log.Printf("playStream: downloaded %d bytes, encoding...", st.Size())
-
-	options := *dca.StdEncodeOptions
-	options.RawOutput = true
-
-	session, err := dca.EncodeFile(tmpPath, &options)
+	stdout, err := ffmpeg.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("dca EncodeFile: %w", err)
+		return fmt.Errorf("ffmpeg stdout pipe: %w", err)
 	}
-	defer session.Cleanup()
+
+	if err := ffmpeg.Start(); err != nil {
+		return fmt.Errorf("ffmpeg start: %w", err)
+	}
+
+	reader := newOggReader(stdout)
+	reader.skipPackets = 2
 
 	frames := 0
 	for {
-		frame, err := session.OpusFrame()
+		packet, err := reader.readPacket()
 		if err != nil {
 			if err == io.EOF {
+				ffmpeg.Wait()
 				log.Printf("playStream: finished, sent %d frames", frames)
 				return nil
 			}
-			return fmt.Errorf("OpusFrame: %w", err)
+			return fmt.Errorf("ogg read: %w", err)
 		}
+
 		if frames == 0 {
-			log.Printf("playStream: first frame len=%d, sending to OpusSend", len(frame))
+			log.Printf("playStream: first frame len=%d, sending to OpusSend", len(packet))
 		}
+
 		select {
-		case vc.OpusSend <- frame:
+		case vc.OpusSend <- packet:
 			frames++
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+type oggReader struct {
+	r          io.Reader
+	buf        []byte
+	pos        int
+	end        int
+	segments   []byte
+	segIdx     int
+	packetBuf  []byte
+	skipPackets int
+	skipped    int
+}
+
+func newOggReader(r io.Reader) *oggReader {
+	return &oggReader{r: r, buf: make([]byte, 65536)}
+}
+
+func (o *oggReader) readPacket() ([]byte, error) {
+	for {
+		for o.segIdx < len(o.segments) {
+			segLen := int(o.segments[o.segIdx])
+			o.segIdx++
+
+			if o.pos+segLen > o.end {
+				if err := o.fill(); err != nil {
+					return nil, err
+				}
+				if o.pos+segLen > o.end {
+					return nil, io.ErrUnexpectedEOF
+				}
+			}
+
+			o.packetBuf = append(o.packetBuf, o.buf[o.pos:o.pos+segLen]...)
+			o.pos += segLen
+
+			if segLen < 255 {
+				packet := o.packetBuf
+				o.packetBuf = nil
+
+				if o.skipped < o.skipPackets {
+					o.skipped++
+					continue
+				}
+				return packet, nil
+			}
+		}
+
+		if err := o.readPage(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (o *oggReader) readPage() error {
+	if err := o.fill(); err != nil {
+		return err
+	}
+
+	for o.end-o.pos >= 4 && string(o.buf[o.pos:o.pos+4]) != "OggS" {
+		o.pos++
+		if o.pos >= o.end {
+			if err := o.fill(); err != nil {
+				return err
+			}
+		}
+	}
+
+	if o.end-o.pos < 27 {
+		return io.ErrUnexpectedEOF
+	}
+
+	hdr := o.buf[o.pos : o.pos+27]
+	segCount := int(hdr[26])
+	o.pos += 27
+
+	totalLen := segCount
+	for o.pos+totalLen > o.end {
+		if err := o.fill(); err != nil {
+			return err
+		}
+	}
+
+	o.segments = o.buf[o.pos : o.pos+segCount]
+	o.segIdx = 0
+	o.pos += segCount
+
+	dataLen := 0
+	for _, s := range o.segments {
+		dataLen += int(s)
+	}
+
+	for o.pos+dataLen > o.end {
+		if err := o.fill(); err != nil {
+			return err
+		}
+		if dataLen > len(o.buf)-o.pos {
+			return fmt.Errorf("ogg page too large: %d bytes", dataLen)
+		}
+	}
+
+	return nil
+}
+
+func (o *oggReader) fill() error {
+	if o.pos > 0 && o.pos < o.end {
+		copy(o.buf, o.buf[o.pos:o.end])
+		o.end -= o.pos
+		o.pos = 0
+	}
+
+	if o.end >= len(o.buf) {
+		return fmt.Errorf("ogg buffer full")
+	}
+
+	n, err := o.r.Read(o.buf[o.end:])
+	if n > 0 {
+		o.end += n
+	}
+	if err != nil {
+		if err == io.EOF && o.end > o.pos {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
