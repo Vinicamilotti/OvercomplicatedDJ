@@ -125,18 +125,17 @@ func hexFirstBytes(data []byte) string {
 }
 
 type oggReader struct {
-	r            io.Reader
-	buf          []byte
-	pos          int
-	end          int
-	segments     []byte
-	segIdx       int
-	packetBuf    []byte
-	minFrameSize int
+	r         io.Reader
+	buf       []byte
+	pos       int
+	end       int
+	segments  []byte
+	segIdx    int
+	packetBuf []byte
 }
 
 func newOggReader(r io.Reader) *oggReader {
-	return &oggReader{r: r, buf: make([]byte, 65536), minFrameSize: 20}
+	return &oggReader{r: r, buf: make([]byte, 65536)}
 }
 
 func (o *oggReader) readPacket() ([]byte, error) {
@@ -161,7 +160,7 @@ func (o *oggReader) readPacket() ([]byte, error) {
 				packet := o.packetBuf
 				o.packetBuf = nil
 
-				if len(packet) < o.minFrameSize {
+				if len(packet) == 0 || packet[0]&0x80 == 0 {
 					continue
 				}
 				return packet, nil
