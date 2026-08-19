@@ -3,62 +3,34 @@ package impl
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os/exec"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL string) error {
-	log.Printf("playStream: resolving %s", youtubeURL)
+	log.Printf("playStream: downloading and converting to mp3...")
 
-	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(resolveCtx, "yt-dlp",
-		"-f", "bestaudio",
-		"-j",
+	ytdlp := exec.CommandContext(ctx, "yt-dlp",
+		"-x", "--audio-format", "mp3",
+		"-o", "-",
 		"--no-playlist",
 		youtubeURL,
 	)
-	output, err := cmd.Output()
+
+	mp3out, err := ytdlp.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("yt-dlp resolve: %w", err)
+		return fmt.Errorf("yt-dlp stdout pipe: %w", err)
 	}
 
-	var info struct {
-		URL         string            `json:"url"`
-		HTTPHeaders map[string]string `json:"http_headers"`
-	}
-	if err := json.Unmarshal(output, &info); err != nil {
-		return fmt.Errorf("yt-dlp parse: %w", err)
+	if err := ytdlp.Start(); err != nil {
+		return fmt.Errorf("yt-dlp start: %w", err)
 	}
 
-	log.Printf("playStream: streaming audio...")
-	req, err := http.NewRequestWithContext(ctx, "GET", info.URL, nil)
-	if err != nil {
-		return fmt.Errorf("http request: %w", err)
-	}
-	for k, v := range info.HTTPHeaders {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("http download: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http status %d", resp.StatusCode)
-	}
-
-	log.Printf("playStream: starting ffmpeg encode...")
+	log.Printf("playStream: encoding mp3 to opus...")
 	ffmpeg := exec.CommandContext(ctx, "ffmpeg",
 		"-i", "pipe:0",
 		"-map", "0:a",
@@ -74,7 +46,7 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 		"-packet_loss", "1",
 		"pipe:1",
 	)
-	ffmpeg.Stdin = resp.Body
+	ffmpeg.Stdin = mp3out
 
 	stdout, err := ffmpeg.StdoutPipe()
 	if err != nil {
@@ -99,12 +71,13 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 			return fmt.Errorf("ogg read: %w", err)
 		}
 
+		if len(packet) < 20 || packet[0]&0x80 == 0 {
+			continue
+		}
+
 		if frames == 0 {
 			log.Printf("playStream: first audio frame len=%d hex=%s",
-				len(packet), hexFirstBytes(packet))
-		} else if frames == 1 {
-			log.Printf("playStream: second audio frame len=%d hex=%s",
-				len(packet), hexFirstBytes(packet))
+				len(packet), hex.EncodeToString(packet[:min(16, len(packet))]))
 		}
 
 		select {
@@ -114,14 +87,6 @@ func playStream(ctx context.Context, vc *discordgo.VoiceConnection, youtubeURL s
 			return ctx.Err()
 		}
 	}
-}
-
-func hexFirstBytes(data []byte) string {
-	n := len(data)
-	if n > 16 {
-		n = 16
-	}
-	return hex.EncodeToString(data[:n])
 }
 
 type oggReader struct {
@@ -159,10 +124,6 @@ func (o *oggReader) readPacket() ([]byte, error) {
 			if segLen < 255 {
 				packet := o.packetBuf
 				o.packetBuf = nil
-
-				if len(packet) < 20 || packet[0]&0x80 == 0 {
-					continue
-				}
 				return packet, nil
 			}
 		}
