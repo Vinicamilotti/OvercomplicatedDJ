@@ -1,5 +1,5 @@
-github.com/Vinicamilotti/discordgo-fork v0.0.0-20260819175757-ad1693f34a15 h1:lrZmj09SIuqSFVQqI7PeMmLWOE6w8fmszz1L4zKuM9A=
-github.com/Vinicamilotti/discordgo-fork v0.0.0-20260819175757-ad1693f34a15/go.mod h1:A0FcMFJKJ9fRjgSuZ2o+pIQ6mPS81SVuiLN2vYTa7Ao=
+github.com/Vinicamilotti/discordgo-fork v0.0.0-20260819185355-e22c9ddea5dd h1:vusHjQT97Dhf81MLhM1IveWTdPGRHu9qiw8ukNIYrD4=
+github.com/Vinicamilotti/discordgo-fork v0.0.0-20260819185355-e22c9ddea5dd/go.mod h1:A0FcMFJKJ9fRjgSuZ2o+pIQ6mPS81SVuiLN2vYTa7Ao=
 github.com/caarlos0/env/v11 v11.4.1 h1:fYwH0sWEsBSMPG7t4e/PEfTFzrWrpjyygXyUnWiSwEw=
 github.com/caarlos0/env/v11 v11.4.1/go.mod h1:qupehSf/Y0TUTsxKywqRt/vJjN5nz6vauiYEUUr8P4U=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
