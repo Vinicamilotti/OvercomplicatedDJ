@@ -4,16 +4,17 @@ import (
 	"context"
 	"log"
 	"sync"
-	"time"
 
 	audioPorts "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/audio/ports"
+	lava "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/lavalink"
 	queuePorts "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/queue/ports"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgolink/v4/disgolink"
+	lv "github.com/disgoorg/disgolink/v4/lavalink"
 )
 
 type guildPlayer struct {
-	cancel  context.CancelFunc
 	playing bool
 }
 
@@ -21,18 +22,34 @@ type PlayerService struct {
 	mu       sync.Mutex
 	players  map[string]*guildPlayer
 	session  *discordgo.Session
+	ll       *lava.Client
 	queueSvc queuePorts.QueueServiceInterface
 }
 
 func NewPlayerService(
 	s *discordgo.Session,
+	ll *lava.Client,
 	queueSvc queuePorts.QueueServiceInterface,
 ) *PlayerService {
-	return &PlayerService{
+	ps := &PlayerService{
 		players:  make(map[string]*guildPlayer),
 		session:  s,
+		ll:       ll,
 		queueSvc: queueSvc,
 	}
+
+	ll.OnTrackEnd(func(guildID string, track lv.Track, reason lv.TrackEndReason) {
+		log.Printf("Player: track ended in guild=%s reason=%s", guildID, reason)
+		ps.mu.Lock()
+		gp := ps.players[guildID]
+		ps.mu.Unlock()
+
+		if gp != nil && gp.playing {
+			ps.playNext(guildID)
+		}
+	})
+
+	return ps
 }
 
 func (ps *PlayerService) Play(guildID, voiceChannelID string) error {
@@ -42,76 +59,59 @@ func (ps *PlayerService) Play(guildID, voiceChannelID string) error {
 		ps.mu.Unlock()
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ps.players[guildID] = &guildPlayer{cancel: cancel, playing: true}
+	ps.players[guildID] = &guildPlayer{playing: true}
 	ps.mu.Unlock()
 
-	go ps.playLoop(ctx, guildID, voiceChannelID)
+	err := ps.session.ChannelVoiceJoinManual(guildID, voiceChannelID, false, false)
+	if err != nil {
+		log.Println("Failed to send voice state update:", err)
+		ps.setPlaying(guildID, false)
+		return err
+	}
+
+	ps.playNext(guildID)
 	return nil
 }
 
-func (ps *PlayerService) playLoop(ctx context.Context, guildID, voiceChannelID string) {
-	log.Printf("playLoop: joining voice channel %s in guild %s", voiceChannelID, guildID)
-	vc, err := ps.session.ChannelVoiceJoin(context.Background(), guildID, voiceChannelID, false, false)
-	if err != nil {
-		log.Println("Failed to join voice channel:", err)
-		ps.setPlaying(guildID, false)
+func (ps *PlayerService) playNext(guildID string) {
+	queue := ps.queueSvc.GetOrCreate(guildID)
+	entry, ok := queue.Next()
+	if !ok {
+		log.Println("Player: queue empty, stopping")
+		ps.Stop(guildID)
 		return
 	}
-	defer vc.Disconnect(context.Background())
-	log.Println("playLoop: connected to voice channel")
 
-	queue := ps.queueSvc.GetOrCreate(guildID)
-
-	for {
-		entry, ok := queue.Next()
-		if !ok {
-			log.Println("playLoop: queue empty, waiting 30s...")
-			select {
-			case <-time.After(30 * time.Second):
-				if queue.Len() == 0 {
-					ps.setPlaying(guildID, false)
-					return
-				}
-				continue
-			case <-ctx.Done():
-				ps.setPlaying(guildID, false)
-				return
-			}
-		}
-
-		log.Printf("Playing: %s\n", entry.Track.Title)
-		if err := playStream(ctx, vc, entry.Track.URL); err != nil {
-			if err == context.Canceled {
-				return
-			}
-			log.Println("Stream error:", err)
-		}
+	log.Printf("Player: loading track: %s", entry.Track.URL)
+	tracks, err := ps.ll.LoadTracks(context.Background(), entry.Track.URL)
+	if err != nil || len(tracks) == 0 {
+		log.Printf("Player: failed to load track: %v", err)
+		ps.playNext(guildID)
+		return
 	}
+
+	player := ps.ll.Player(guildID)
+	err = player.Update(context.Background(), disgolink.WithTrack(tracks[0]))
+	if err != nil {
+		log.Printf("Player: failed to play: %v", err)
+		ps.playNext(guildID)
+		return
+	}
+
+	log.Printf("Player: now playing: %s", entry.Track.Title)
 }
 
 func (ps *PlayerService) Skip(guildID string) error {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	gp, exists := ps.players[guildID]
-	if !exists || !gp.playing {
-		return nil
-	}
-	gp.cancel()
+	log.Printf("Player: skipping in guild=%s", guildID)
+	ps.playNext(guildID)
 	return nil
 }
 
 func (ps *PlayerService) Stop(guildID string) error {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	gp, exists := ps.players[guildID]
-	if !exists {
-		return nil
-	}
-	if gp.playing {
-		gp.cancel()
-	}
-	gp.playing = false
+	log.Printf("Player: stopping guild=%s", guildID)
+	ps.setPlaying(guildID, false)
+	ps.ll.DestroyPlayer(guildID)
+	ps.session.ChannelVoiceJoinManual(guildID, "", false, false)
 	return nil
 }
 
@@ -125,8 +125,16 @@ func (ps *PlayerService) IsPlaying(guildID string) bool {
 func (ps *PlayerService) setPlaying(guildID string, playing bool) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	if gp, exists := ps.players[guildID]; exists {
-		gp.playing = playing
+	gp := ps.players[guildID]
+	if gp == nil {
+		if playing {
+			ps.players[guildID] = &guildPlayer{playing: true}
+		}
+		return
+	}
+	gp.playing = playing
+	if !playing {
+		delete(ps.players, guildID)
 	}
 }
 

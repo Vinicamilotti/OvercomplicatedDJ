@@ -2,19 +2,20 @@ package yt
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
+	lava "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/lavalink"
 	"github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/media/entities"
 )
 
-type YouTubeProvider struct{}
+type YouTubeProvider struct {
+	ll *lava.Client
+}
 
-func NewYouTubeProvider() *YouTubeProvider {
-	return &YouTubeProvider{}
+func NewYouTubeProvider(ll *lava.Client) *YouTubeProvider {
+	return &YouTubeProvider{ll: ll}
 }
 
 func (p *YouTubeProvider) Supports(url string) bool {
@@ -22,41 +23,34 @@ func (p *YouTubeProvider) Supports(url string) bool {
 }
 
 func (p *YouTubeProvider) Search(query string) (*entities.Track, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	searchQuery := query
+	if !strings.HasPrefix(query, "http") {
+		searchQuery = "ytsearch:" + query
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "yt-dlp", fmt.Sprintf("ytsearch1:%s", query), "-j", "--no-playlist")
-	output, err := cmd.Output()
+	tracks, err := p.ll.LoadTracks(ctx, searchQuery)
 	if err != nil {
-		return nil, fmt.Errorf("yt-dlp search failed: %w", err)
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+	if len(tracks) == 0 {
+		return nil, fmt.Errorf("no results for: %s", query)
 	}
 
-	var result struct {
-		ID         string  `json:"id"`
-		Title      string  `json:"title"`
-		WebpageURL string  `json:"webpage_url"`
-		Duration   float64 `json:"duration"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse yt-dlp output: %w", err)
+	t := tracks[0]
+	duration := int(t.Info.Length / 1000)
+
+	uri := ""
+	if t.Info.URI != nil {
+		uri = *t.Info.URI
 	}
 
 	return &entities.Track{
-		URL:      result.WebpageURL,
-		Title:    result.Title,
+		URL:      uri,
+		Title:    t.Info.Title,
 		Platform: "youtube",
-		Duration: int(result.Duration),
+		Duration: duration,
 	}, nil
-}
-
-func (p *YouTubeProvider) GetStreamURL(url string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "yt-dlp", "-f", "bestaudio", "-g", url)
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("yt-dlp get stream URL failed: %w", err)
-	}
-	return strings.TrimSpace(string(output)), nil
 }

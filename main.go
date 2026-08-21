@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	skipHandler "github.com/Vinicamilotti/OvercomplicatedDJ/internal/commands/skip/handler"
 	audioImpl "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/audio/impl"
 	discRouter "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/discord/router"
+	lava "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/lavalink"
 	queueImpl "github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/queue/impl"
 	"github.com/Vinicamilotti/OvercomplicatedDJ/internal/shared/yt"
 
@@ -30,10 +32,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	discSession.LogLevel = discordgo.LogInformational
 
 	router := discRouter.NewRouter(discSession)
-
 	discSession.AddHandler(router.OnInteractionCreate)
 
 	err = discSession.Open()
@@ -45,8 +45,24 @@ func main() {
 	fmt.Println("Bot is now running. Press CTRL-C to exit.")
 
 	queueSvc := queueImpl.NewQueueService()
-	ytProvider := yt.NewYouTubeProvider()
-	playerSvc := audioImpl.NewPlayerService(discSession, queueSvc)
+
+	ll, err := lava.New(cfg, discSession.State.User.ID)
+	if err != nil {
+		panic(fmt.Errorf("lavalink: %w", err))
+	}
+
+	discSession.AddHandler(func(s *discordgo.Session, e *discordgo.VoiceStateUpdate) {
+		if e.UserID != discSession.State.User.ID {
+			return
+		}
+		ll.OnVoiceStateUpdate(context.TODO(), e.GuildID, e.ChannelID, e.SessionID)
+	})
+	discSession.AddHandler(func(s *discordgo.Session, e *discordgo.VoiceServerUpdate) {
+		ll.OnVoiceServerUpdate(context.TODO(), e.GuildID, e.Token, e.Endpoint)
+	})
+
+	playerSvc := audioImpl.NewPlayerService(discSession, ll, queueSvc)
+	ytProvider := yt.NewYouTubeProvider(ll)
 
 	err = router.AddCommand(pingHandler.NewPingHandler())
 	if err != nil {

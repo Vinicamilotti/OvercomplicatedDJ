@@ -6,7 +6,9 @@ import (
 )
 
 type Config struct {
-	DiscordToken string `env:"DISCORD_TOKEN"`
+	DiscordToken     string `env:"DISCORD_TOKEN"`
+	LavalinkAddr     string `env:"LAVALINK_ADDR"`
+	LavalinkPassword string `env:"LAVALINK_PASSWORD"`
 }
 
 var Configs *Config
